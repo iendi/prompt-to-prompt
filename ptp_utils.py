@@ -105,7 +105,8 @@ def text2image_ldm(
     latent: Optional[torch.FloatTensor] = None,
 ):
     register_attention_control(model, controller)
-    height = width = 256
+    height = width = 512
+    print("height:", height)
     batch_size = len(prompt)
     
     uncond_input = model.tokenizer([""] * batch_size, padding="max_length", max_length=77, return_tensors="pt")
@@ -137,7 +138,7 @@ def text2image_ldm_stable(
     low_resource: bool = False,
 ):
     register_attention_control(model, controller)
-    height = width = 512
+    height = width = 400
     batch_size = len(prompt)
 
     text_input = model.tokenizer(
