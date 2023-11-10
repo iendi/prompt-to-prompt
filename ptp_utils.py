@@ -87,10 +87,10 @@ def latent2image(vae, latents):
 def init_latent(latent, model, height, width, generator, batch_size):
     if latent is None:
         latent = torch.randn(
-            (1, model.unet.in_channels, height // 8, width // 8),
+            (1, model.unet.config.in_channels, height // 8, width // 8),
             generator=generator,
         )
-    latents = latent.expand(batch_size,  model.unet.in_channels, height // 8, width // 8).to(model.device)
+    latents = latent.expand(batch_size,  model.unet.config.in_channels, height // 8, width // 8).to(model.device)
     return latent, latents
 
 
@@ -160,8 +160,8 @@ def text2image_ldm_stable(
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     
     # set timesteps
-    extra_set_kwargs = {"offset": 1}
-    model.scheduler.set_timesteps(num_inference_steps, **extra_set_kwargs)
+    # extra_set_kwargs = {"offset": 1}
+    model.scheduler.set_timesteps(num_inference_steps)
     for t in tqdm(model.scheduler.timesteps):
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource)
     
@@ -239,16 +239,22 @@ def register_attention_control(model, controller):
 
     controller.num_att_layers = cross_att_count
 
-    
+# 给定text，从中搜索word的位置    
 def get_word_inds(text: str, word_place: int, tokenizer):
     split_text = text.split(" ")
     if type(word_place) is str:
         word_place = [i for i, word in enumerate(split_text) if word_place == word]
     elif type(word_place) is int:
         word_place = [word_place]
+    #  假设输入text="i am a man in the beach"
+    #  word_place=man
+    #  得到word_place=[3]
     out = []
     if len(word_place) > 0:
+        # 对text编码，对编码后的每个item解码，并去除前后的'#'，得到每个word?
         words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
+        print("words_encode:", words_encode)
+        # 当前单词的长度、处理单词的位置
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):
