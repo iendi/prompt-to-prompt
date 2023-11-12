@@ -71,6 +71,8 @@ def diffusion_step(model, controller, latents, context, t, guidance_scale, low_r
         noise_pred_uncond, noise_prediction_text = noise_pred.chunk(2)
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
     latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
+    # replace时用不到
+    # 
     latents = controller.step_callback(latents)
     return latents
 
@@ -101,8 +103,8 @@ def text2image_ldm(
     model,
     prompt:  List[str],
     controller,
-    num_inference_steps: int = 50,
-    guidance_scale: Optional[float] = 7.,
+    num_inference_steps: int = 64,
+    guidance_scale: Optional[float] = 15.,
     generator: Optional[torch.Generator] = None,
     latent: Optional[torch.FloatTensor] = None,
 ):
@@ -124,7 +126,7 @@ def text2image_ldm(
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale)
     
     image = latent2image(model.vqvae, latents)
-   
+    # 返回生成的图像和初始的latent
     return image, latent
 
 # 文本到图像的生成
@@ -150,7 +152,8 @@ def text2image_ldm_stable(
         max_length=model.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt",
-    )# 返回的是一个字典，包含input_ids, token_type_ids, attention_mask
+    )# 返回的是一个字典，包含input_ids, attention_mask
+    # 获取文本的embedding
     text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # [1, num_tokens, length_embedding]
     max_length = text_input.input_ids.shape[-1]
     uncond_input = model.tokenizer(
@@ -162,7 +165,7 @@ def text2image_ldm_stable(
     if not low_resource:
         context = torch.cat(context) # Tensor(2,77,768)
     
-    # 初始化latent
+    # 初始化latent，如果height=width=512，那么latent的shape为[bs, in_channels, 64, 64]
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     
     # set timesteps
