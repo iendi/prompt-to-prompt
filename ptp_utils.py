@@ -62,7 +62,7 @@ def view_images(images, num_rows=1, offset_ratio=0.02):
 
 
 def diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False):
-    if low_resource:
+    if low_resource: #分别预测条件为uncond和text的噪声
         noise_pred_uncond = model.unet(latents, t, encoder_hidden_states=context[0])["sample"]
         noise_prediction_text = model.unet(latents, t, encoder_hidden_states=context[1])["sample"]
     else:
@@ -87,10 +87,12 @@ def latent2image(vae, latents):
 def init_latent(latent, model, height, width, generator, batch_size):
     if latent is None:
         latent = torch.randn(
-            (1, model.unet.config.in_channels, height // 8, width // 8),
+            (1, model.unet.in_channels, height // 8, width // 8),
             generator=generator,
         )
-    latents = latent.expand(batch_size,  model.unet.config.in_channels, height // 8, width // 8).to(model.device)
+    # 拓展到batch_size大小
+    # 如原来是[1, 320, 40, 40]，拓展后为[8, 320, 40, 40]，就是8个一样的
+    latents = latent.expand(batch_size,  model.unet.in_channels, height // 8, width // 8).to(model.device)
     return latent, latents
 
 
@@ -104,9 +106,9 @@ def text2image_ldm(
     generator: Optional[torch.Generator] = None,
     latent: Optional[torch.FloatTensor] = None,
 ):
+    # 修改Unet中每一层CrossAttention类的forward，使Unet在做注意力计算时可以保存其注意力图的参数
     register_attention_control(model, controller)
     height = width = 512
-    print("height:", height)
     batch_size = len(prompt)
     
     uncond_input = model.tokenizer([""] * batch_size, padding="max_length", max_length=77, return_tensors="pt")
@@ -125,7 +127,8 @@ def text2image_ldm(
    
     return image, latent
 
-
+# 文本到图像的生成
+# controler: 用于控制注意力的函数, AttentionScore
 @torch.no_grad()
 def text2image_ldm_stable(
     model,
@@ -138,26 +141,28 @@ def text2image_ldm_stable(
     low_resource: bool = False,
 ):
     register_attention_control(model, controller)
-    height = width = 400
+    height = width = 512
     batch_size = len(prompt)
-
+    # prompt的token化
     text_input = model.tokenizer(
         prompt,
         padding="max_length",
         max_length=model.tokenizer.model_max_length,
         truncation=True,
         return_tensors="pt",
-    )
-    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
+    )# 返回的是一个字典，包含input_ids, token_type_ids, attention_mask
+    text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0] # [1, num_tokens, length_embedding]
     max_length = text_input.input_ids.shape[-1]
     uncond_input = model.tokenizer(
         [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
     )
     uncond_embeddings = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
     
-    context = [uncond_embeddings, text_embeddings]
+    context = [uncond_embeddings, text_embeddings] # list[Tensor(1,77,768), Tensor(1,77,768),]
     if not low_resource:
-        context = torch.cat(context)
+        context = torch.cat(context) # Tensor(2,77,768)
+    
+    # 初始化latent
     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
     
     # set timesteps
@@ -170,9 +175,13 @@ def text2image_ldm_stable(
   
     return image, latent
 
-
+# 主要是为了 216行的 添加attn score到controller中
+# 并且修改controller.num_att_layers的值
 def register_attention_control(model, controller):
+    # place_in_unet: "down", "up", "mid"
     def ca_forward(self, place_in_unet):
+        # self: diffusers.models.attention.CrossAttention
+        # 获取模型的输出层
         to_out = self.to_out
         if type(to_out) is torch.nn.modules.container.ModuleList:
             to_out = self.to_out[0]
@@ -187,20 +196,24 @@ def register_attention_control(model, controller):
             context = context if is_cross else x
             k = self.to_k(context)
             v = self.to_v(context)
-            q = self.reshape_heads_to_batch_dim(q)
+            q = self.reshape_heads_to_batch_dim(q) #([1, 4096, 320]) -> ([8, 4096, 40])
             k = self.reshape_heads_to_batch_dim(k)
             v = self.reshape_heads_to_batch_dim(v)
-
+            
+            # 计算点积，得到相似度矩阵
             sim = torch.einsum("b i d, b j d -> b i j", q, k) * self.scale
 
             if mask is not None:
                 mask = mask.reshape(batch_size, -1)
-                max_neg_value = -torch.finfo(sim.dtype).max
+                max_neg_value = -torch.finfo(sim.dtype).max #最小值
                 mask = mask[:, None, :].repeat(h, 1, 1)
-                sim.masked_fill_(~mask, max_neg_value)
+                # 将mask为False的位置替换为最小值
+                # 在计算softmax时，最小值的位置会接近0
+                sim.masked_fill_(~mask, max_neg_value) 
 
             # attention, what we cannot get enough of
             attn = sim.softmax(dim=-1)
+            # 添加attn score到controller中
             attn = controller(attn, is_cross, place_in_unet)
             out = torch.einsum("b i j, b j d -> b i d", attn, v)
             out = self.reshape_batch_dim_to_heads(out)
@@ -231,6 +244,8 @@ def register_attention_control(model, controller):
     cross_att_count = 0
     sub_nets = model.unet.named_children()
     for net in sub_nets:
+        # 以'down_blocks' 为例
+        # net[1]:
         if "down" in net[0]:
             cross_att_count += register_recr(net[1], 0, "down")
         elif "up" in net[0]:
@@ -240,22 +255,16 @@ def register_attention_control(model, controller):
 
     controller.num_att_layers = cross_att_count
 
-# 给定text，从中搜索word的位置    
+    
 def get_word_inds(text: str, word_place: int, tokenizer):
     split_text = text.split(" ")
     if type(word_place) is str:
         word_place = [i for i, word in enumerate(split_text) if word_place == word]
     elif type(word_place) is int:
         word_place = [word_place]
-    #  假设输入text="i am a man in the beach"
-    #  word_place=man
-    #  得到word_place=[3]
     out = []
     if len(word_place) > 0:
-        # 对text编码，对编码后的每个item解码，并去除前后的'#'，得到每个word?
         words_encode = [tokenizer.decode([item]).strip("#") for item in tokenizer.encode(text)][1:-1]
-        print("words_encode:", words_encode)
-        # 当前单词的长度、处理单词的位置
         cur_len, ptr = 0, 0
 
         for i in range(len(words_encode)):
