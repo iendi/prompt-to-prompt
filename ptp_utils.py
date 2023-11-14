@@ -72,12 +72,13 @@ def diffusion_step(model, controller, latents, context, t, guidance_scale, low_r
     noise_pred = noise_pred_uncond + guidance_scale * (noise_prediction_text - noise_pred_uncond)
     latents = model.scheduler.step(noise_pred, t, latents)["prev_sample"]
     # replace时用不到
-    # 
+    # refine时：
     latents = controller.step_callback(latents)
     return latents
 
 
 def latent2image(vae, latents):
+    # scaling_factor是0.18215
     latents = 1 / 0.18215 * latents
     image = vae.decode(latents)['sample']
     image = (image / 2 + 0.5).clamp(0, 1)
@@ -87,6 +88,7 @@ def latent2image(vae, latents):
 
 
 def init_latent(latent, model, height, width, generator, batch_size):
+    # /8，是因为height经过vae encoder后，height 变为原来的1/8
     if latent is None:
         latent = torch.randn(
             (1, model.unet.in_channels, height // 8, width // 8),
@@ -126,7 +128,6 @@ def text2image_ldm(
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale)
     
     image = latent2image(model.vqvae, latents)
-    # 返回生成的图像和初始的latent
     return image, latent
 
 # 文本到图像的生成
@@ -175,7 +176,7 @@ def text2image_ldm_stable(
         latents = diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource)
     
     image = latent2image(model.vae, latents)
-  
+    # 返回生成的图像和初始的latent
     return image, latent
 
 # 主要是为了 216行的 添加attn score到controller中
